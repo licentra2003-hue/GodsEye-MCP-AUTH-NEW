@@ -1435,9 +1435,9 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🧠 GodsEye MCP v5.0 — Intelligent Fetch Planning`);
-    console.log(`📡 SSE:      http://localhost:${PORT}/sse`);
-    console.log(`📬 Messages: http://localhost:${PORT}/messages?sessionId=<id>`);
-    console.log(`💚 Health:   http://localhost:${PORT}/health`);
+    console.log(`📡 SSE:      http://0.0.0.0:${PORT}/sse`);
+    console.log(`📬 Messages: http://0.0.0.0:${PORT}/messages?sessionId=<id>`);
+    console.log(`💚 Health:   http://0.0.0.0:${PORT}/health`);
     console.log(`✅ LLM-driven fetch planning: Gemini decides zones, engines, limit, and strategy`);
     console.log(`✅ Iterative batched fetching with mid-loop Gemini summarization`);
     console.log(`✅ Token budget guard: safe limit = ${TOKEN_BUDGET.safe_context_limit} tokens`);
