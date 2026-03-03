@@ -17,12 +17,12 @@ const supabase = createClient(
 
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
-if (!geminiApiKey) {
-    throw new Error(
-        "❌ GEMINI_API_KEY is required. Get one from: https://aistudio.google.com/app/apikey"
-    );
+let geminiAI: GoogleGenAI | null = null;
+if (geminiApiKey) {
+    geminiAI = new GoogleGenAI({ apiKey: geminiApiKey });
+} else {
+    console.warn("⚠️  GEMINI_API_KEY is missing. Server will boot, but analysis planning will fail until it is provided.");
 }
-const geminiAI = new GoogleGenAI({ apiKey: geminiApiKey });
 
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
@@ -316,6 +316,7 @@ Return a JSON FetchPlan strictly matching the schema.`;
             required: ["zones", "reasoning", "engines", "estimatedComplexity", "fetchStrategy", "iterative", "fetchOptions"],
         };
 
+        if (!geminiAI) throw new Error("Gemini API key is missing. Ensure the GEMINI_API_KEY environment variable is set.");
         const response = await geminiAI.models.generateContent({
             model: "gemini-2.5-flash",
             contents: prompt,
@@ -682,6 +683,7 @@ TASK:
 Be concise. Your summary will be combined with others into a final report.`;
 
     try {
+        if (!geminiAI) throw new Error("Gemini API key is missing.");
         const response = await geminiAI.models.generateContent({
             model: "gemini-2.5-flash",
             contents: prompt,
@@ -1292,6 +1294,12 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     });
 });
 
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    res.json({
+        issuer: process.env.SUPABASE_URL!,
+    });
+});
+
 app.get(["/sse", "/sse/"], requireOAuth, async (req, res) => {
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
@@ -1433,11 +1441,11 @@ app.get("/health", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT as number, "0.0.0.0", () => {
     console.log(`🧠 GodsEye MCP v5.0 — Intelligent Fetch Planning`);
-    console.log(`📡 SSE:      http://0.0.0.0:${PORT}/sse`);
-    console.log(`📬 Messages: http://0.0.0.0:${PORT}/messages?sessionId=<id>`);
-    console.log(`💚 Health:   http://0.0.0.0:${PORT}/health`);
+    console.log(`📡 SSE:      http://localhost:${PORT}/sse`);
+    console.log(`📬 Messages: http://localhost:${PORT}/messages?sessionId=<id>`);
+    console.log(`💚 Health:   http://localhost:${PORT}/health`);
     console.log(`✅ LLM-driven fetch planning: Gemini decides zones, engines, limit, and strategy`);
     console.log(`✅ Iterative batched fetching with mid-loop Gemini summarization`);
     console.log(`✅ Token budget guard: safe limit = ${TOKEN_BUDGET.safe_context_limit} tokens`);

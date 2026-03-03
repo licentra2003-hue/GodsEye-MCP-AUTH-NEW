@@ -21,9 +21,10 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     // OR in the req.query.token (for SSE EventSource connections)
     let token = req.query.token as string;
 
-    if (!token && req.headers.authorization) {
-        const authHeader = req.headers.authorization;
-        if (authHeader.startsWith("Bearer ")) {
+    if (!token) {
+        // Express usually lowercases headers, but we check both just in case a proxy changes it
+        const authHeader = req.headers.authorization || req.headers['Authorization'] as string;
+        if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
             token = authHeader.substring(7);
         }
     }
