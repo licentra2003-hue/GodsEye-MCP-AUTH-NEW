@@ -1286,16 +1286,29 @@ ${err.stack}`,
 // 🔥 MULTI-USER SSE TRANSPORT
 // ============================================================
 
-app.get("/.well-known/oauth-protected-resource", (req, res) => {
+app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/*"], (req, res) => {
+    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Received discovery req on ${req.url}`);
+
+    // Hardcode the resource to exactly what Claude requested (whether /sse or root)
+    // Or return the canonical domain if preferred.
+    // The spec allows returning the exact resource URI that was requested.
+    const requestedResource = `https://${req.headers.host}${req.originalUrl.replace('/.well-known/oauth-protected-resource', '')}`;
     const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+
+    const resourceToReturn = req.originalUrl.includes("/sse") ? requestedResource : domain;
+
+    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Returning authorization_servers: [${domain}] for resource: ${resourceToReturn}`);
+
     res.json({
-        resource: domain,
+        resource: resourceToReturn,
         // CRITICAL CHANGE: Tell mcp-remote to ask YOUR server for the auth details, not Supabase
         authorization_servers: [domain],
     });
 });
 
-app.get("/.well-known/oauth-authorization-server", (req, res) => {
+app.get(["/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/*"], (req, res) => {
+    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Authorized server requested on ${req.url}`);
+
     // Provide the exact Supabase auth endpoints so mcp-remote doesn't hang
     const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, ""); // remove trailing slash if any
     res.json({
