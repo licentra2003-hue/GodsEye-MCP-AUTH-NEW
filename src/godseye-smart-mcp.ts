@@ -1290,13 +1290,21 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
     res.json({
         resource: domain,
-        authorization_servers: [process.env.SUPABASE_URL!],
+        // CRITICAL CHANGE: Tell mcp-remote to ask YOUR server for the auth details, not Supabase
+        authorization_servers: [domain],
     });
 });
 
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    // Provide the exact Supabase auth endpoints so mcp-remote doesn't hang
+    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, ""); // remove trailing slash if any
     res.json({
-        issuer: process.env.SUPABASE_URL!,
+        issuer: supabaseUrl,
+        authorization_endpoint: `${supabaseUrl}/auth/v1/authorize`,
+        token_endpoint: `${supabaseUrl}/auth/v1/token`,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"]
     });
 });
 
