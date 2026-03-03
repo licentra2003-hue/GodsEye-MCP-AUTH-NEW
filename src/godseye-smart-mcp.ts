@@ -27,7 +27,12 @@ if (geminiApiKey) {
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use((req, res, next) => {
-    console.log(`[NETWORK IN] ${req.method} ${req.url}`);
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`\n[DEBUG WORKFLOW] 🌐 NETWORK IN: ${req.method} ${req.url}`);
+        console.log(`[DEBUG WORKFLOW] 📡 Headers:`, JSON.stringify(req.headers));
+    } else {
+        console.log(`[NETWORK IN] ${req.method} ${req.url}`);
+    }
     next();
 });
 
@@ -1286,42 +1291,50 @@ ${err.stack}`,
 // 🔥 MULTI-USER SSE TRANSPORT
 // ============================================================
 
-app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/*"], (req, res) => {
-    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Received discovery req on ${req.url}`);
-
-    // Hardcode the resource to exactly what Claude requested (whether /sse or root)
-    // Or return the canonical domain if preferred.
-    // The spec allows returning the exact resource URI that was requested.
-    const requestedResource = `https://${req.headers.host}${req.originalUrl.replace('/.well-known/oauth-protected-resource', '')}`;
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🛡️ Client requested OAuth Protected Resource discovery.`);
+    }
     const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
 
-    const resourceToReturn = req.originalUrl.includes("/sse") ? requestedResource : domain;
-
-    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Returning authorization_servers: [${domain}] for resource: ${resourceToReturn}`);
-
-    res.json({
-        resource: resourceToReturn,
+    const responsePayload = {
+        resource: domain,
         // CRITICAL CHANGE: Tell mcp-remote to ask YOUR server for the auth details, not Supabase
         authorization_servers: [domain],
-    });
+    };
+
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🛡️ Returning Protected Resource config:`, responsePayload);
+    }
+    res.json(responsePayload);
 });
 
-app.get(["/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/*"], (req, res) => {
-    if (process.env.DEBUG_MODE === "true") console.log(`[DEBUG] Authorized server requested on ${req.url}`);
-
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🔑 Client requested OAuth Authorization Server discovery.`);
+    }
     // Provide the exact Supabase auth endpoints so mcp-remote doesn't hang
     const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, ""); // remove trailing slash if any
-    res.json({
+
+    const responsePayload = {
         issuer: supabaseUrl,
         authorization_endpoint: `${supabaseUrl}/auth/v1/authorize`,
         token_endpoint: `${supabaseUrl}/auth/v1/token`,
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
         code_challenge_methods_supported: ["S256"]
-    });
+    };
+
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🔑 Returning Auth Server config:`, responsePayload);
+    }
+    res.json(responsePayload);
 });
 
 app.get(["/sse", "/sse/"], requireOAuth, async (req, res) => {
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🟢 /sse route handler reached AFTER requireOAuth middleware passed successfully.`);
+    }
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
     const userId = (req as any).user.id;
