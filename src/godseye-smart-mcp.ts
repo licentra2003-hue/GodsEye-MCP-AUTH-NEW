@@ -15,6 +15,11 @@ const supabase = createClient(
     process.env.SUPABASE_KEY!
 );
 
+if (!process.env.SUPABASE_ANON_KEY) {
+    console.error("❌ FATAL: SUPABASE_ANON_KEY is not set. The consent page will not work.");
+    process.exit(1);
+}
+
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 let geminiAI: GoogleGenAI | null = null;
@@ -1303,11 +1308,11 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     }
     const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
     const cleanDomain = domain.replace(/\/$/, "");
+    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
 
-    // CRITICAL: Point to ourselves to bypass Dynamic Client Registration
     const responsePayload = {
         resource: cleanDomain,
-        authorization_servers: [cleanDomain],
+        authorization_servers: [`${supabaseUrl}/auth/v1`],
     };
 
     if (process.env.DEBUG_MODE === "true") {
@@ -1325,14 +1330,11 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
     const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
 
     const responsePayload = {
-        issuer: cleanDomain, // MUST match the domain exactly
-
-        // Point to Supabase's strict Third-Party OAuth endpoints
+        issuer: `${supabaseUrl}/auth/v1`,
         authorization_endpoint: `${supabaseUrl}/auth/v1/oauth/authorize`,
         token_endpoint: `${supabaseUrl}/auth/v1/oauth/token`,
-
         response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
         code_challenge_methods_supported: ["S256"]
     };
 

@@ -26,13 +26,18 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     const isSSE = req.path.includes('/sse') || req.headers.accept?.includes('text/event-stream');
 
     // 2. Helper function to handle 401s without crashing Claude's strict EventSource parser
-    const sendUnauthorized = (message: string, reason: string) => {
+    const sendUnauthorized = (message: string, reason: string, hadToken: boolean) => {
         console.log(`[AUTH DEBUG] 🔴 Rejecting request to ${req.url}. Reason: ${reason}`);
-        res.setHeader("WWW-Authenticate", 'Bearer error="invalid_token"');
+
+        const domain = process.env.MCP_SERVER_DOMAIN?.replace(/\/$/, "") || `http://localhost:${process.env.PORT || 3000}`;
+
+        const wwwAuth = hadToken
+            ? `Bearer error="invalid_token", resource_metadata="${domain}/.well-known/oauth-protected-resource"`
+            : `Bearer resource_metadata="${domain}/.well-known/oauth-protected-resource"`;
+
+        res.setHeader("WWW-Authenticate", wwwAuth);
 
         if (isSSE) {
-            // Keep it incredibly simple. No JSON, no text/event-stream. 
-            // Just a hard HTTP 401 so the fetch client can read the headers without parsing a body.
             res.status(401).end();
         } else {
             res.status(401).json({ error: message });
@@ -49,19 +54,19 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     }
 
     if (!token) {
-        return sendUnauthorized("Unauthorized: Missing token", "No token found in query or headers");
+        return sendUnauthorized("Unauthorized: Missing token", "No token found in query or headers", false);
     }
 
     try {
         const { data: { user }, error } = await supabase.auth.getUser(token);
 
         if (error || !user) {
-            return sendUnauthorized(`Unauthorized: ${error ? error.message : "Invalid token"}`, error ? error.message : "User not found in Supabase");
+            return sendUnauthorized(`Unauthorized: ${error ? error.message : "Invalid token"}`, error ? error.message : "User not found in Supabase", true);
         }
 
         req.user = user;
         next();
     } catch (err: any) {
-        return sendUnauthorized("Unauthorized: Token verification failed", err.message || "Unknown error during verification");
+        return sendUnauthorized("Unauthorized: Token verification failed", err.message || "Unknown error during verification", true);
     }
 };
