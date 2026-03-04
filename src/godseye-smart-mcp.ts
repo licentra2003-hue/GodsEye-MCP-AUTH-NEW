@@ -6,6 +6,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { z } from "zod";
+import crypto from "crypto";
 import { requireOAuth } from "./middleware/auth.js";
 
 dotenv.config();
@@ -1302,293 +1303,309 @@ ${err.stack}`,
 // 🔥 MULTI-USER SSE TRANSPORT
 // ============================================================
 
+// ── In-memory auth code store ────────────────────────────────
+// Maps one-time auth_code → { supabase token, PKCE challenge, metadata }
+// Codes expire in 5 minutes and are deleted after single use.
+
+interface AuthCodeEntry {
+    supabaseAccessToken: string;
+    supabaseRefreshToken: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    redirectUri: string;
+    clientId: string;
+    expiresAt: number;
+}
+
+const authCodeStore = new Map<string, AuthCodeEntry>();
+
+// Purge expired codes every 2 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [code, entry] of authCodeStore) {
+        if (now > entry.expiresAt) authCodeStore.delete(code);
+    }
+}, 2 * 60 * 1000);
+
+function verifyPkce(codeVerifier: string, codeChallenge: string, method: string): boolean {
+    if (method === "S256") {
+        const hash = crypto.createHash("sha256").update(codeVerifier).digest();
+        const computed = hash.toString("base64url");
+        return computed === codeChallenge;
+    }
+    if (method === "plain") {
+        return codeVerifier === codeChallenge;
+    }
+    return false;
+}
+
+// ── Helper: HTML-escape to prevent XSS in hidden fields ──
+function escHtml(str: string): string {
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+// ============================================================
+// ROUTE 1: OAuth Protected Resource Metadata (RFC 9728)
+// authorization_servers points to MCP SERVER, not Supabase.
+// ============================================================
+
 app.get(/^\/\.well-known\/oauth-protected-resource(\/.*)?$/, (req, res) => {
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🛡️ Client requested OAuth Protected Resource discovery.`);
-    }
-    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
-    const cleanDomain = domain.replace(/\/$/, "");
-    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
+    const domain = (process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, "");
 
-    const responsePayload = {
-        resource: cleanDomain,
-        authorization_servers: [`${supabaseUrl}/auth/v1`],
-    };
-
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🛡️ Returning Protected Resource config:`, responsePayload);
-    }
-    res.json(responsePayload);
+    res.json({
+        resource: domain,
+        authorization_servers: [domain],
+    });
 });
+
+// ============================================================
+// ROUTE 2: OAuth Authorization Server Metadata (RFC 8414)
+// All endpoints point to THIS server.
+// ============================================================
 
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🔑 Client requested OAuth Authorization Server discovery.`);
-    }
-    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
-    const cleanDomain = domain.replace(/\/$/, "");
-    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
+    const domain = (process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, "");
 
-    const responsePayload = {
-        issuer: `${supabaseUrl}/auth/v1`,
-        authorization_endpoint: `${supabaseUrl}/auth/v1/oauth/authorize`,
-        token_endpoint: `${supabaseUrl}/auth/v1/oauth/token`,
+    res.json({
+        issuer: domain,
+        authorization_endpoint: `${domain}/oauth/authorize`,
+        token_endpoint: `${domain}/oauth/token`,
         response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
-        code_challenge_methods_supported: ["S256"]
-    };
-
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🔑 Returning Auth Server config:`, responsePayload);
-    }
-    res.json(responsePayload);
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256", "plain"],
+        token_endpoint_auth_methods_supported: ["none"],
+    });
 });
 
-app.get("/oauth/consent", (req, res) => {
-    const authorizationId = req.query.authorization_id;
-    if (!authorizationId) return res.status(400).send("Missing authorization_id");
+// ============================================================
+// ROUTE 3: Authorization Endpoint
+// mcp-remote opens this in the user's browser.
+// Shows an email/password login form backed by Supabase.
+// ============================================================
 
-    const html = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Authorize GodsEye MCP</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-                display: flex; justify-content: center; align-items: center;
-                min-height: 100vh; background: #0a0a0a; color: #e0e0e0;
-            }
-            .card {
-                background: #1a1a2e; padding: 2.5rem; border-radius: 12px;
-                max-width: 420px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-                border: 1px solid #2a2a3e;
-            }
-            h2 { color: #fff; margin-bottom: 0.5rem; font-size: 1.4rem; }
-            .subtitle { color: #888; margin-bottom: 1.5rem; font-size: 0.9rem; }
-            .app-name { color: #24b47e; font-weight: 600; }
-            .scopes { background: #12121f; border-radius: 8px; padding: 1rem; margin: 1rem 0; border: 1px solid #2a2a3e; }
-            .scopes h4 { color: #aaa; font-size: 0.8rem; text-transform: uppercase; margin-bottom: 0.5rem; }
-            .scope-item { color: #ccc; padding: 0.3rem 0; font-size: 0.9rem; }
-            .scope-item::before { content: "✓ "; color: #24b47e; }
-            input {
-                width: 100%; padding: 0.75rem 1rem; margin-bottom: 0.75rem;
-                background: #12121f; border: 1px solid #2a2a3e; border-radius: 6px;
-                color: #fff; font-size: 0.95rem; outline: none; transition: border 0.2s;
-            }
-            input:focus { border-color: #24b47e; }
-            input::placeholder { color: #555; }
-            .btn {
-                padding: 0.75rem 1.5rem; font-size: 0.95rem; cursor: pointer;
-                border: none; border-radius: 6px; font-weight: 600;
-                transition: opacity 0.2s, transform 0.1s; width: 100%;
-            }
-            .btn:active { transform: scale(0.98); }
-            .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-            .btn-approve { background: #24b47e; color: white; margin-bottom: 0.5rem; }
-            .btn-approve:hover:not(:disabled) { opacity: 0.9; }
-            .btn-deny { background: transparent; color: #888; border: 1px solid #333; }
-            .btn-deny:hover:not(:disabled) { color: #ff6b6b; border-color: #ff6b6b; }
-            .btn-login { background: #24b47e; color: white; }
-            .btn-login:hover:not(:disabled) { opacity: 0.9; }
-            .actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.5rem; }
-            #status { margin-top: 1rem; font-size: 0.85rem; min-height: 1.2em; }
-            .status-error { color: #ff6b6b; }
-            .status-info { color: #888; }
-            .status-success { color: #24b47e; }
-            .hidden { display: none; }
-            .loading { text-align: center; padding: 2rem 0; }
-            .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #333; border-top: 3px solid #24b47e; border-radius: 50%; animation: spin 0.8s linear infinite; }
-            @keyframes spin { to { transform: rotate(360deg); } }
-            .user-info { background: #12121f; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; font-size: 0.85rem; color: #888; border: 1px solid #2a2a3e; }
-            .user-info strong { color: #ccc; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <!-- Loading State -->
-            <div id="loadingView">
-                <div class="loading"><div class="spinner"></div><p class="status-info" style="margin-top:1rem">Checking session...</p></div>
-            </div>
+app.get("/oauth/authorize", (req, res) => {
+    const {
+        client_id,
+        redirect_uri,
+        code_challenge,
+        code_challenge_method,
+        state,
+        response_type,
+    } = req.query as Record<string, string>;
 
-            <!-- Login Form -->
-            <div id="loginView" class="hidden">
-                <h2>🔐 Sign In to GodsEye</h2>
-                <p class="subtitle">You must sign in before granting access.</p>
-                <form id="loginForm">
-                    <input type="email" id="email" placeholder="Email address" required autocomplete="email" />
-                    <input type="password" id="password" placeholder="Password" required autocomplete="current-password" />
-                    <button type="submit" class="btn btn-login" id="loginBtn">Sign In</button>
-                </form>
-                <p id="loginStatus" class="status-info"></p>
-            </div>
+    if (!redirect_uri || !code_challenge || response_type !== "code") {
+        return res.status(400).send("Missing required OAuth parameters (redirect_uri, code_challenge, response_type=code).");
+    }
 
-            <!-- Consent Screen -->
-            <div id="consentView" class="hidden">
-                <h2>🛡️ Authorize Access</h2>
-                <p class="subtitle">An application is requesting access to your GodsEye account.</p>
-                <div class="user-info">Signed in as <strong id="userEmail"></strong></div>
-                <div id="appDetails">
-                    <p>Application: <span class="app-name" id="appName">Loading...</span></p>
-                </div>
-                <div class="scopes" id="scopesContainer">
-                    <h4>Requested Permissions</h4>
-                    <div id="scopesList"></div>
-                </div>
-                <div class="actions">
-                    <button class="btn btn-approve" id="approveBtn">✓ Approve Access</button>
-                    <button class="btn btn-deny" id="denyBtn">✗ Deny</button>
-                </div>
-                <p id="consentStatus" class="status-info"></p>
-            </div>
-        </div>
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in to GodsEye</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      display: flex; justify-content: center; align-items: center;
+      min-height: 100vh; background: #0a0a0a; color: #e0e0e0;
+    }
+    .card {
+      background: #1a1a2e; padding: 2.5rem; border-radius: 12px;
+      max-width: 420px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      border: 1px solid #2a2a3e;
+    }
+    h2 { color: #fff; margin-bottom: 0.5rem; font-size: 1.4rem; }
+    .subtitle { color: #888; margin-bottom: 1.5rem; font-size: 0.9rem; }
+    input {
+      width: 100%; padding: 0.75rem 1rem; margin-bottom: 0.75rem;
+      background: #12121f; border: 1px solid #2a2a3e; border-radius: 6px;
+      color: #fff; font-size: 0.95rem; outline: none; transition: border 0.2s;
+    }
+    input:focus { border-color: #24b47e; }
+    input::placeholder { color: #555; }
+    .btn {
+      width: 100%; padding: 0.75rem; font-size: 0.95rem; cursor: pointer;
+      background: #24b47e; color: white; border: none; border-radius: 6px;
+      font-weight: 600; transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #error { color: #ff6b6b; font-size: 0.85rem; margin-top: 0.75rem; min-height: 1.2em; }
+    #status { color: #24b47e; font-size: 0.85rem; margin-top: 0.75rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>\u{1f6e1}\ufe0f Sign in to GodsEye</h2>
+    <p class="subtitle">Authorize Claude Desktop to access your GodsEye analytics.</p>
+    <form id="loginForm">
+      <input type="hidden" name="client_id"             value="${escHtml(client_id || "")}" />
+      <input type="hidden" name="redirect_uri"          value="${escHtml(redirect_uri)}" />
+      <input type="hidden" name="code_challenge"        value="${escHtml(code_challenge)}" />
+      <input type="hidden" name="code_challenge_method" value="${escHtml(code_challenge_method || "S256")}" />
+      <input type="hidden" name="state"                 value="${escHtml(state || "")}" />
+      <input type="email"    id="email"    name="email"    placeholder="Email address"  required autocomplete="email" />
+      <input type="password" id="password" name="password" placeholder="Password"       required autocomplete="current-password" />
+      <button type="submit" class="btn" id="submitBtn">Sign In &amp; Authorize</button>
+    </form>
+    <p id="error"></p>
+    <p id="status"></p>
+  </div>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('submitBtn');
+      const errorEl = document.getElementById('error');
+      const statusEl = document.getElementById('status');
+      btn.disabled = true;
+      errorEl.textContent = '';
+      statusEl.textContent = 'Signing in...';
 
-        <script type="module">
-            import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
-            const supabase = createClient('${process.env.SUPABASE_URL}', '${process.env.SUPABASE_ANON_KEY}');
-            const authorizationId = '${authorizationId}';
+      const form = new FormData(e.target);
+      const body = new URLSearchParams();
+      for (const [k, v] of form.entries()) body.append(k, v);
 
-            const $ = (id) => document.getElementById(id);
-            const show = (id) => $(id).classList.remove('hidden');
-            const hide = (id) => $(id).classList.add('hidden');
+      try {
+        const res = await fetch('/oauth/authorize/callback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+          redirect: 'manual',
+        });
 
-            // ─── Step 1: Check Session ───
-            async function checkSession() {
-                try {
-                    const { data: { user } } = await supabase.auth.getUser();
-                    if (user) {
-                        await showConsentScreen(user);
-                    } else {
-                        hide('loadingView');
-                        show('loginView');
-                    }
-                } catch (err) {
-                    hide('loadingView');
-                    show('loginView');
-                }
-            }
+        if (res.status === 302 || res.type === 'opaqueredirect') {
+          statusEl.textContent = 'Authorized! Redirecting back to Claude Desktop...';
+          const location = res.headers.get('Location');
+          if (location) window.location.href = location;
+        } else if (res.status === 200) {
+          // Server returned redirect URL in JSON body (fallback)
+          const data = await res.json().catch(() => ({}));
+          if (data.redirect_to) {
+            statusEl.textContent = 'Authorized! Redirecting...';
+            window.location.href = data.redirect_to;
+          }
+        } else {
+          const data = await res.json().catch(() => ({}));
+          errorEl.textContent = data.error || 'Invalid email or password.';
+          btn.disabled = false;
+          statusEl.textContent = '';
+        }
+      } catch (err) {
+        errorEl.textContent = 'Network error. Please try again.';
+        btn.disabled = false;
+        statusEl.textContent = '';
+      }
+    });
+  </script>
+</body>
+</html>`;
 
-            // ─── Step 2: Login ───
-            $('loginForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const loginBtn = $('loginBtn');
-                const statusEl = $('loginStatus');
-                loginBtn.disabled = true;
-                statusEl.className = 'status-info';
-                statusEl.innerText = 'Signing in...';
-
-                const email = $('email').value;
-                const password = $('password').value;
-
-                const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-
-                if (error) {
-                    statusEl.className = 'status-error';
-                    statusEl.innerText = error.message;
-                    loginBtn.disabled = false;
-                    return;
-                }
-
-                statusEl.className = 'status-success';
-                statusEl.innerText = 'Signed in! Loading consent...';
-                await showConsentScreen(data.user);
-            });
-
-            // ─── Step 3 & 4: Fetch Details & Show Consent ───
-            async function showConsentScreen(user) {
-                hide('loadingView');
-                hide('loginView');
-                show('consentView');
-
-                $('userEmail').innerText = user.email || user.id;
-
-                try {
-                    const { data: authDetails, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
-                    if (error) {
-                        $('consentStatus').className = 'status-error';
-                        $('consentStatus').innerText = 'Could not load authorization details: ' + error.message;
-                        $('appName').innerText = 'Unknown Application';
-                        $('scopesList').innerHTML = '<div class="scope-item">Full account access</div>';
-                        return;
-                    }
-
-                    $('appName').innerText = authDetails?.client?.name || 'Claude Desktop';
-                    const scopes = authDetails?.scope ? authDetails.scope.split(' ') : ['full_access'];
-                    $('scopesList').innerHTML = scopes.map(s => '<div class="scope-item">' + s + '</div>').join('');
-                } catch (err) {
-                    // If getAuthorizationDetails is not available, show a generic consent screen
-                    $('appName').innerText = 'Claude Desktop';
-                    $('scopesList').innerHTML = '<div class="scope-item">Access your GodsEye data</div>';
-                }
-            }
-
-            // ─── Step 5: Approve / Deny ───
-            $('approveBtn').addEventListener('click', async () => {
-                $('approveBtn').disabled = true;
-                $('denyBtn').disabled = true;
-                $('consentStatus').className = 'status-info';
-                $('consentStatus').innerText = 'Approving...';
-
-                try {
-                    const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
-                    if (error) {
-                        $('consentStatus').className = 'status-error';
-                        $('consentStatus').innerText = 'Error: ' + error.message;
-                        $('approveBtn').disabled = false;
-                        $('denyBtn').disabled = false;
-                        return;
-                    }
-                    $('consentStatus').className = 'status-success';
-                    $('consentStatus').innerText = 'Approved! Redirecting...';
-                    if (data?.redirect_to) {
-                        window.location.href = data.redirect_to;
-                    }
-                } catch (err) {
-                    $('consentStatus').className = 'status-error';
-                    $('consentStatus').innerText = 'Unexpected error: ' + err.message;
-                    $('approveBtn').disabled = false;
-                    $('denyBtn').disabled = false;
-                }
-            });
-
-            $('denyBtn').addEventListener('click', async () => {
-                $('approveBtn').disabled = true;
-                $('denyBtn').disabled = true;
-                $('consentStatus').className = 'status-info';
-                $('consentStatus').innerText = 'Denying...';
-
-                try {
-                    const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
-                    if (error) {
-                        $('consentStatus').className = 'status-error';
-                        $('consentStatus').innerText = 'Error: ' + error.message;
-                        $('approveBtn').disabled = false;
-                        $('denyBtn').disabled = false;
-                        return;
-                    }
-                    $('consentStatus').className = 'status-info';
-                    $('consentStatus').innerText = 'Access denied. Redirecting...';
-                    if (data?.redirect_to) {
-                        window.location.href = data.redirect_to;
-                    }
-                } catch (err) {
-                    $('consentStatus').className = 'status-error';
-                    $('consentStatus').innerText = 'Unexpected error: ' + err.message;
-                    $('approveBtn').disabled = false;
-                    $('denyBtn').disabled = false;
-                }
-            });
-
-            // ─── Boot ───
-            checkSession();
-        </script>
-    </body>
-    </html>
-    `;
     res.send(html);
+});
+
+// ── Authorize callback: validate credentials, issue auth code, redirect ──
+
+app.post("/oauth/authorize/callback", express.urlencoded({ extended: true }), async (req, res) => {
+    const {
+        email,
+        password,
+        client_id,
+        redirect_uri,
+        code_challenge,
+        code_challenge_method,
+        state,
+    } = req.body as Record<string, string>;
+
+    if (!redirect_uri || !code_challenge || !email || !password) {
+        return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    // Authenticate user against Supabase
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+
+    if (authError || !authData?.session) {
+        return res.status(401).json({ error: authError?.message || "Invalid email or password." });
+    }
+
+    // Generate one-time auth code
+    const code = crypto.randomBytes(32).toString("base64url");
+
+    authCodeStore.set(code, {
+        supabaseAccessToken: authData.session.access_token,
+        supabaseRefreshToken: authData.session.refresh_token,
+        codeChallenge: code_challenge,
+        codeChallengeMethod: code_challenge_method || "S256",
+        redirectUri: redirect_uri,
+        clientId: client_id || "",
+        expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
+    });
+
+    console.log(`[OAUTH] Auth code issued for user ${authData.user.id}, client ${client_id}`);
+
+    // Redirect back to mcp-remote
+    const callbackUrl = new URL(redirect_uri);
+    callbackUrl.searchParams.set("code", code);
+    if (state) callbackUrl.searchParams.set("state", state);
+
+    // Return redirect URL in JSON since fetch with redirect:'manual' can't read Location header
+    return res.json({ redirect_to: callbackUrl.toString() });
+});
+
+// ============================================================
+// ROUTE 4: Token Endpoint
+// mcp-remote exchanges the auth code for a Supabase JWT.
+// Validates PKCE, returns the token.
+// ============================================================
+
+app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) => {
+    const body = req.body as Record<string, string>;
+    const { grant_type, code, code_verifier, redirect_uri, client_id } = body;
+
+    if (grant_type !== "authorization_code") {
+        return res.status(400).json({ error: "unsupported_grant_type" });
+    }
+
+    if (!code || !code_verifier) {
+        return res.status(400).json({ error: "invalid_request", error_description: "Missing code or code_verifier." });
+    }
+
+    const entry = authCodeStore.get(code);
+
+    if (!entry) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "Auth code not found or expired." });
+    }
+
+    if (Date.now() > entry.expiresAt) {
+        authCodeStore.delete(code);
+        return res.status(400).json({ error: "invalid_grant", error_description: "Auth code has expired." });
+    }
+
+    // PKCE verification
+    if (!verifyPkce(code_verifier, entry.codeChallenge, entry.codeChallengeMethod)) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed." });
+    }
+
+    // redirect_uri must match what was used to generate the code
+    if (redirect_uri && entry.redirectUri !== redirect_uri) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch." });
+    }
+
+    // Single-use: delete immediately after validation
+    authCodeStore.delete(code);
+
+    console.log(`[OAUTH] Token issued for client ${entry.clientId}`);
+
+    // Return the Supabase JWT — requireOAuth validates this via supabase.auth.getUser()
+    return res.json({
+        access_token: entry.supabaseAccessToken,
+        token_type: "bearer",
+        expires_in: 3600,
+    });
 });
 
 app.get(["/sse", "/sse/"], requireOAuth, async (req, res) => {
