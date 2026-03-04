@@ -1328,8 +1328,8 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
         issuer: cleanDomain, // MUST match the domain exactly
 
         // Point to Supabase's strict Third-Party OAuth endpoints
-        authorization_endpoint: `${supabaseUrl}/oauth/authorize`,
-        token_endpoint: `${supabaseUrl}/oauth/token`,
+        authorization_endpoint: `${supabaseUrl}/auth/v1/oauth/authorize`,
+        token_endpoint: `${supabaseUrl}/auth/v1/oauth/token`,
 
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
