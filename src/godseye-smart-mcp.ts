@@ -27,11 +27,17 @@ if (geminiApiKey) {
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use((req, res, next) => {
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`\n[DEBUG WORKFLOW] 🌐 NETWORK IN: ${req.method} ${req.url}`);
-        console.log(`[DEBUG WORKFLOW] 📡 Headers:`, JSON.stringify(req.headers));
-    } else {
-        console.log(`[NETWORK IN] ${req.method} ${req.url}`);
+    if (req.path.includes('/sse') || req.path.includes('.well-known')) {
+        console.log(`[NETWORK DEBUG] ➡️ INCOMING ${req.method} ${req.url}`);
+        console.log(`[NETWORK DEBUG] ➡️ HEADERS:`, JSON.stringify(req.headers));
+
+        const originalSend = res.send;
+        res.send = function (body) {
+            console.log(`[NETWORK DEBUG] ⬅️ OUTGOING STATUS: ${res.statusCode}`);
+            console.log(`[NETWORK DEBUG] ⬅️ OUTGOING HEADERS:`, res.getHeaders());
+            console.log(`[NETWORK DEBUG] ⬅️ OUTGOING BODY:`, body);
+            return originalSend.call(this, body);
+        };
     }
     next();
 });
