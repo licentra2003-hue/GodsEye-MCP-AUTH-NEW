@@ -17,8 +17,13 @@ declare module "express-serve-static-core" {
 }
 
 export const requireOAuth = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    // Determine the base domain for the resource_metadata pointer (RFC 9728)
+    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+    const authHeaderValue = `Bearer realm="mcp", resource_metadata="${domain}/.well-known/oauth-protected-resource"`;
+
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🔒 requireOAuth middleware invoked for ${req.method} ${req.url}`);
+        console.log(`[DEBUG WORKFLOW] 🔒 WWW-Authenticate will use: ${authHeaderValue}`);
     }
 
     // Check for a token in the Authorization header (Bearer token)
@@ -46,7 +51,7 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
         if (process.env.DEBUG_MODE === "true") {
             console.log(`[DEBUG WORKFLOW] ⛔ No token found. Returning 401 with WWW-Authenticate header to trigger client OAuth flow.`);
         }
-        res.setHeader("WWW-Authenticate", "Bearer");
+        res.setHeader("WWW-Authenticate", authHeaderValue);
         res.status(401).json({ error: "Unauthorized: Missing token" });
         return;
     }
@@ -61,7 +66,7 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
             if (process.env.DEBUG_MODE === "true") {
                 console.log(`[DEBUG WORKFLOW] ⛔ Supabase rejected token:`, error ? error.message : "No user returned");
             }
-            res.setHeader("WWW-Authenticate", "Bearer");
+            res.setHeader("WWW-Authenticate", authHeaderValue);
             res.status(401).json({ error: "Unauthorized: Invalid token" });
             return;
         }
@@ -76,7 +81,7 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
         if (process.env.DEBUG_MODE === "true") {
             console.error(`[DEBUG WORKFLOW] 💥 Fatal error during token verification:`, err.message || err);
         }
-        res.setHeader("WWW-Authenticate", "Bearer");
+        res.setHeader("WWW-Authenticate", authHeaderValue);
         res.status(401).json({ error: "Unauthorized: Token verification failed" });
         return;
     }
