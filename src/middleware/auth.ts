@@ -25,25 +25,7 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     // 1. Determine if this is an SSE connection
     const isSSE = req.path.includes('/sse') || req.headers.accept?.includes('text/event-stream');
 
-    // 2. Helper function to handle 401s without crashing Claude's strict EventSource parser
-    const sendUnauthorized = (message: string, reason: string, hadToken: boolean) => {
-        console.log(`[AUTH DEBUG] 🔴 Rejecting request to ${req.url}. Reason: ${reason}`);
-
-        const domain = process.env.MCP_SERVER_DOMAIN?.replace(/\/$/, "") || `http://localhost:${process.env.PORT || 3000}`;
-
-        const wwwAuth = hadToken
-            ? `Bearer error="invalid_token", resource_metadata="${domain}/.well-known/oauth-protected-resource"`
-            : `Bearer resource_metadata="${domain}/.well-known/oauth-protected-resource"`;
-
-        res.setHeader("WWW-Authenticate", wwwAuth);
-
-        if (isSSE) {
-            res.status(401).end();
-        } else {
-            res.status(401).json({ error: message });
-        }
-    };
-
+    // 2. Extract token from query or headers FIRST
     let token = req.query.token as string;
 
     if (!token) {
@@ -53,20 +35,47 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
         }
     }
 
+    // 3. Helper function — defined AFTER token so the closure captures the resolved value
+    const sendUnauthorized = (message: string, reason: string) => {
+        console.log(`[AUTH DEBUG] 🔴 Rejecting request to ${req.url}. Reason: ${reason}`);
+
+        const domain = (process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, "");
+
+        if (token) {
+            // Token was provided but is invalid/expired
+            res.setHeader(
+                "WWW-Authenticate",
+                `Bearer error="invalid_token", error_description="Token is invalid or expired", resource_metadata="${domain}/.well-known/oauth-protected-resource"`
+            );
+        } else {
+            // No token at all — just point client to resource metadata, no error code
+            res.setHeader(
+                "WWW-Authenticate",
+                `Bearer resource_metadata="${domain}/.well-known/oauth-protected-resource"`
+            );
+        }
+
+        if (isSSE) {
+            res.status(401).end();
+        } else {
+            res.status(401).json({ error: message });
+        }
+    };
+
     if (!token) {
-        return sendUnauthorized("Unauthorized: Missing token", "No token found in query or headers", false);
+        return sendUnauthorized("Unauthorized: Missing token", "No token found in query or headers");
     }
 
     try {
         const { data: { user }, error } = await supabase.auth.getUser(token);
 
         if (error || !user) {
-            return sendUnauthorized(`Unauthorized: ${error ? error.message : "Invalid token"}`, error ? error.message : "User not found in Supabase", true);
+            return sendUnauthorized(`Unauthorized: ${error ? error.message : "Invalid token"}`, error ? error.message : "User not found in Supabase");
         }
 
         req.user = user;
         next();
     } catch (err: any) {
-        return sendUnauthorized("Unauthorized: Token verification failed", err.message || "Unknown error during verification", true);
+        return sendUnauthorized("Unauthorized: Token verification failed", err.message || "Unknown error during verification");
     }
 };
