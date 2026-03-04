@@ -1313,13 +1313,17 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🔑 Client requested OAuth Authorization Server discovery.`);
     }
-    // Provide the exact Supabase auth endpoints so mcp-remote doesn't hang
-    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, ""); // remove trailing slash if any
+    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+    const cleanDomain = domain.replace(/\/$/, "");
+    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
 
     const responsePayload = {
-        issuer: supabaseUrl,
-        authorization_endpoint: `${supabaseUrl}/auth/v1/authorize`,
-        token_endpoint: `${supabaseUrl}/auth/v1/token`,
+        issuer: cleanDomain,
+
+        // 🚨 CRITICAL FIX: These must use /oauth/, NOT /auth/v1/
+        authorization_endpoint: `${supabaseUrl}/oauth/authorize`,
+        token_endpoint: `${supabaseUrl}/oauth/token`,
+
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
         code_challenge_methods_supported: ["S256"]
