@@ -1301,16 +1301,43 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🛡️ Client requested OAuth Protected Resource discovery.`);
     }
-    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
+    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+    const cleanDomain = domain.replace(/\/$/, "");
 
+    // CRITICAL: Point to ourselves to bypass Dynamic Client Registration
     const responsePayload = {
-        resource: process.env.MCP_SERVER_DOMAIN || `https://${req.hostname}`,
-        // Point directly to Supabase so it handles Dynamic Client Registration
-        authorization_servers: [`${supabaseUrl}/auth/v1`],
+        resource: cleanDomain,
+        authorization_servers: [cleanDomain],
     };
 
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🛡️ Returning Protected Resource config:`, responsePayload);
+    }
+    res.json(responsePayload);
+});
+
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🔑 Client requested OAuth Authorization Server discovery.`);
+    }
+    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+    const cleanDomain = domain.replace(/\/$/, "");
+    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
+
+    const responsePayload = {
+        issuer: cleanDomain, // MUST match the domain exactly
+
+        // Point to Supabase's strict Third-Party OAuth endpoints
+        authorization_endpoint: `${supabaseUrl}/oauth/authorize`,
+        token_endpoint: `${supabaseUrl}/oauth/token`,
+
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"]
+    };
+
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🔑 Returning Auth Server config:`, responsePayload);
     }
     res.json(responsePayload);
 });
