@@ -1348,31 +1348,240 @@ app.get("/oauth/consent", (req, res) => {
 
     const html = `
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Authorize GodsEye MCP</title>
-        <style>body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #121212; color: white; }</style>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+                display: flex; justify-content: center; align-items: center;
+                min-height: 100vh; background: #0a0a0a; color: #e0e0e0;
+            }
+            .card {
+                background: #1a1a2e; padding: 2.5rem; border-radius: 12px;
+                max-width: 420px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                border: 1px solid #2a2a3e;
+            }
+            h2 { color: #fff; margin-bottom: 0.5rem; font-size: 1.4rem; }
+            .subtitle { color: #888; margin-bottom: 1.5rem; font-size: 0.9rem; }
+            .app-name { color: #24b47e; font-weight: 600; }
+            .scopes { background: #12121f; border-radius: 8px; padding: 1rem; margin: 1rem 0; border: 1px solid #2a2a3e; }
+            .scopes h4 { color: #aaa; font-size: 0.8rem; text-transform: uppercase; margin-bottom: 0.5rem; }
+            .scope-item { color: #ccc; padding: 0.3rem 0; font-size: 0.9rem; }
+            .scope-item::before { content: "✓ "; color: #24b47e; }
+            input {
+                width: 100%; padding: 0.75rem 1rem; margin-bottom: 0.75rem;
+                background: #12121f; border: 1px solid #2a2a3e; border-radius: 6px;
+                color: #fff; font-size: 0.95rem; outline: none; transition: border 0.2s;
+            }
+            input:focus { border-color: #24b47e; }
+            input::placeholder { color: #555; }
+            .btn {
+                padding: 0.75rem 1.5rem; font-size: 0.95rem; cursor: pointer;
+                border: none; border-radius: 6px; font-weight: 600;
+                transition: opacity 0.2s, transform 0.1s; width: 100%;
+            }
+            .btn:active { transform: scale(0.98); }
+            .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+            .btn-approve { background: #24b47e; color: white; margin-bottom: 0.5rem; }
+            .btn-approve:hover:not(:disabled) { opacity: 0.9; }
+            .btn-deny { background: transparent; color: #888; border: 1px solid #333; }
+            .btn-deny:hover:not(:disabled) { color: #ff6b6b; border-color: #ff6b6b; }
+            .btn-login { background: #24b47e; color: white; }
+            .btn-login:hover:not(:disabled) { opacity: 0.9; }
+            .actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.5rem; }
+            #status { margin-top: 1rem; font-size: 0.85rem; min-height: 1.2em; }
+            .status-error { color: #ff6b6b; }
+            .status-info { color: #888; }
+            .status-success { color: #24b47e; }
+            .hidden { display: none; }
+            .loading { text-align: center; padding: 2rem 0; }
+            .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #333; border-top: 3px solid #24b47e; border-radius: 50%; animation: spin 0.8s linear infinite; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+            .user-info { background: #12121f; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; font-size: 0.85rem; color: #888; border: 1px solid #2a2a3e; }
+            .user-info strong { color: #ccc; }
+        </style>
     </head>
     <body>
-        <div style="background: #1e1e1e; padding: 2rem; border-radius: 8px; text-align: center;">
-            <h2>Connect GodsEye to Claude</h2>
-            <p>Claude is requesting access to your GodsEye data.</p>
-            <button id="approveBtn" style="padding: 10px 20px; font-size: 16px; cursor: pointer; background: #24b47e; color: white; border: none; border-radius: 4px;">Approve Access</button>
-            <p id="status"></p>
+        <div class="card">
+            <!-- Loading State -->
+            <div id="loadingView">
+                <div class="loading"><div class="spinner"></div><p class="status-info" style="margin-top:1rem">Checking session...</p></div>
+            </div>
+
+            <!-- Login Form -->
+            <div id="loginView" class="hidden">
+                <h2>🔐 Sign In to GodsEye</h2>
+                <p class="subtitle">You must sign in before granting access.</p>
+                <form id="loginForm">
+                    <input type="email" id="email" placeholder="Email address" required autocomplete="email" />
+                    <input type="password" id="password" placeholder="Password" required autocomplete="current-password" />
+                    <button type="submit" class="btn btn-login" id="loginBtn">Sign In</button>
+                </form>
+                <p id="loginStatus" class="status-info"></p>
+            </div>
+
+            <!-- Consent Screen -->
+            <div id="consentView" class="hidden">
+                <h2>🛡️ Authorize Access</h2>
+                <p class="subtitle">An application is requesting access to your GodsEye account.</p>
+                <div class="user-info">Signed in as <strong id="userEmail"></strong></div>
+                <div id="appDetails">
+                    <p>Application: <span class="app-name" id="appName">Loading...</span></p>
+                </div>
+                <div class="scopes" id="scopesContainer">
+                    <h4>Requested Permissions</h4>
+                    <div id="scopesList"></div>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-approve" id="approveBtn">✓ Approve Access</button>
+                    <button class="btn btn-deny" id="denyBtn">✗ Deny</button>
+                </div>
+                <p id="consentStatus" class="status-info"></p>
+            </div>
         </div>
+
         <script type="module">
-            import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm'
+            import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
             const supabase = createClient('${process.env.SUPABASE_URL}', '${process.env.SUPABASE_ANON_KEY}');
-            
-            document.getElementById('approveBtn').onclick = async () => {
-                document.getElementById('status').innerText = "Approving...";
-                const { data, error } = await supabase.auth.oauth.approveAuthorization('${authorizationId}');
-                if (error) {
-                    document.getElementById('status').innerText = "Error: " + error.message;
-                } else if (data?.redirect_to) {
-                    window.location.href = data.redirect_to;
+            const authorizationId = '${authorizationId}';
+
+            const $ = (id) => document.getElementById(id);
+            const show = (id) => $(id).classList.remove('hidden');
+            const hide = (id) => $(id).classList.add('hidden');
+
+            // ─── Step 1: Check Session ───
+            async function checkSession() {
+                try {
+                    const { data: { user } } = await supabase.auth.getUser();
+                    if (user) {
+                        await showConsentScreen(user);
+                    } else {
+                        hide('loadingView');
+                        show('loginView');
+                    }
+                } catch (err) {
+                    hide('loadingView');
+                    show('loginView');
                 }
-            };
+            }
+
+            // ─── Step 2: Login ───
+            $('loginForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const loginBtn = $('loginBtn');
+                const statusEl = $('loginStatus');
+                loginBtn.disabled = true;
+                statusEl.className = 'status-info';
+                statusEl.innerText = 'Signing in...';
+
+                const email = $('email').value;
+                const password = $('password').value;
+
+                const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+                if (error) {
+                    statusEl.className = 'status-error';
+                    statusEl.innerText = error.message;
+                    loginBtn.disabled = false;
+                    return;
+                }
+
+                statusEl.className = 'status-success';
+                statusEl.innerText = 'Signed in! Loading consent...';
+                await showConsentScreen(data.user);
+            });
+
+            // ─── Step 3 & 4: Fetch Details & Show Consent ───
+            async function showConsentScreen(user) {
+                hide('loadingView');
+                hide('loginView');
+                show('consentView');
+
+                $('userEmail').innerText = user.email || user.id;
+
+                try {
+                    const { data: authDetails, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+                    if (error) {
+                        $('consentStatus').className = 'status-error';
+                        $('consentStatus').innerText = 'Could not load authorization details: ' + error.message;
+                        $('appName').innerText = 'Unknown Application';
+                        $('scopesList').innerHTML = '<div class="scope-item">Full account access</div>';
+                        return;
+                    }
+
+                    $('appName').innerText = authDetails?.client?.name || 'Claude Desktop';
+                    const scopes = authDetails?.scope ? authDetails.scope.split(' ') : ['full_access'];
+                    $('scopesList').innerHTML = scopes.map(s => '<div class="scope-item">' + s + '</div>').join('');
+                } catch (err) {
+                    // If getAuthorizationDetails is not available, show a generic consent screen
+                    $('appName').innerText = 'Claude Desktop';
+                    $('scopesList').innerHTML = '<div class="scope-item">Access your GodsEye data</div>';
+                }
+            }
+
+            // ─── Step 5: Approve / Deny ───
+            $('approveBtn').addEventListener('click', async () => {
+                $('approveBtn').disabled = true;
+                $('denyBtn').disabled = true;
+                $('consentStatus').className = 'status-info';
+                $('consentStatus').innerText = 'Approving...';
+
+                try {
+                    const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
+                    if (error) {
+                        $('consentStatus').className = 'status-error';
+                        $('consentStatus').innerText = 'Error: ' + error.message;
+                        $('approveBtn').disabled = false;
+                        $('denyBtn').disabled = false;
+                        return;
+                    }
+                    $('consentStatus').className = 'status-success';
+                    $('consentStatus').innerText = 'Approved! Redirecting...';
+                    if (data?.redirect_to) {
+                        window.location.href = data.redirect_to;
+                    }
+                } catch (err) {
+                    $('consentStatus').className = 'status-error';
+                    $('consentStatus').innerText = 'Unexpected error: ' + err.message;
+                    $('approveBtn').disabled = false;
+                    $('denyBtn').disabled = false;
+                }
+            });
+
+            $('denyBtn').addEventListener('click', async () => {
+                $('approveBtn').disabled = true;
+                $('denyBtn').disabled = true;
+                $('consentStatus').className = 'status-info';
+                $('consentStatus').innerText = 'Denying...';
+
+                try {
+                    const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
+                    if (error) {
+                        $('consentStatus').className = 'status-error';
+                        $('consentStatus').innerText = 'Error: ' + error.message;
+                        $('approveBtn').disabled = false;
+                        $('denyBtn').disabled = false;
+                        return;
+                    }
+                    $('consentStatus').className = 'status-info';
+                    $('consentStatus').innerText = 'Access denied. Redirecting...';
+                    if (data?.redirect_to) {
+                        window.location.href = data.redirect_to;
+                    }
+                } catch (err) {
+                    $('consentStatus').className = 'status-error';
+                    $('consentStatus').innerText = 'Unexpected error: ' + err.message;
+                    $('approveBtn').disabled = false;
+                    $('denyBtn').disabled = false;
+                }
+            });
+
+            // ─── Boot ───
+            checkSession();
         </script>
     </body>
     </html>
