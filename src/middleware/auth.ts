@@ -9,7 +9,6 @@ const supabase = createClient(
     process.env.SUPABASE_KEY!
 );
 
-// Extend the Express Request interface
 declare module "express-serve-static-core" {
     interface Request {
         user?: User | any;
@@ -21,8 +20,27 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
         console.log(`[DEBUG WORKFLOW] 🔒 requireOAuth middleware invoked for ${req.method} ${req.url}`);
     }
 
-    // Check for a token in the Authorization header (Bearer token)
-    // OR in the req.query.token (for SSE EventSource connections)
+    // Determine if this is an SSE connection so we can format the 401 error correctly
+    const isSSE = req.path.includes('/sse') || req.headers.accept?.includes('text/event-stream');
+
+    if (process.env.DEBUG_MODE === "true") {
+        console.log(`[DEBUG WORKFLOW] 🔍 isSSE=${isSSE}, path=${req.path}, accept=${req.headers.accept}`);
+    }
+
+    // Helper function to handle 401s without crashing Claude's strict EventSource parser
+    const sendUnauthorized = (message: string) => {
+        if (process.env.DEBUG_MODE === "true") {
+            console.log(`[DEBUG WORKFLOW] ⛔ Sending 401: "${message}" (isSSE=${isSSE})`);
+        }
+        res.setHeader("WWW-Authenticate", "Bearer");
+        if (isSSE) {
+            res.setHeader("Content-Type", "text/event-stream");
+            res.status(401).send(`event: error\ndata: ${message}\n\n`);
+        } else {
+            res.status(401).json({ error: message });
+        }
+    };
+
     let token = req.query.token as string;
 
     if (process.env.DEBUG_MODE === "true" && token) {
@@ -30,7 +48,6 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     }
 
     if (!token) {
-        // Express usually lowercases headers, but we check both just in case a proxy changes it
         const authHeader = req.headers.authorization || req.headers['Authorization'] as string;
         if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
             token = authHeader.substring(7);
@@ -43,12 +60,7 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
     }
 
     if (!token) {
-        if (process.env.DEBUG_MODE === "true") {
-            console.log(`[DEBUG WORKFLOW] ⛔ No token found. Returning 401 with WWW-Authenticate header to trigger client OAuth flow.`);
-        }
-        res.setHeader("WWW-Authenticate", "Bearer");
-        res.status(401).json({ error: "Unauthorized: Missing token" });
-        return;
+        return sendUnauthorized("Unauthorized: Missing token");
     }
 
     try {
@@ -61,23 +73,18 @@ export const requireOAuth = async (req: Request, res: Response, next: NextFuncti
             if (process.env.DEBUG_MODE === "true") {
                 console.log(`[DEBUG WORKFLOW] ⛔ Supabase rejected token:`, error ? error.message : "No user returned");
             }
-            res.setHeader("WWW-Authenticate", "Bearer");
-            res.status(401).json({ error: "Unauthorized: Invalid token" });
-            return;
+            return sendUnauthorized(`Unauthorized: ${error ? error.message : "Invalid token"}`);
         }
 
         if (process.env.DEBUG_MODE === "true") {
             console.log(`[DEBUG WORKFLOW] ✅ Token verified successfully. User ID: ${user.id}`);
         }
-        // Attach the user to the request
         req.user = user;
         next();
     } catch (err: any) {
         if (process.env.DEBUG_MODE === "true") {
             console.error(`[DEBUG WORKFLOW] 💥 Fatal error during token verification:`, err.message || err);
         }
-        res.setHeader("WWW-Authenticate", "Bearer");
-        res.status(401).json({ error: "Unauthorized: Token verification failed" });
-        return;
+        return sendUnauthorized("Unauthorized: Token verification failed");
     }
 };
