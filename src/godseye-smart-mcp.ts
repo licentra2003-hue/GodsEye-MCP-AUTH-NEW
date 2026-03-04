@@ -1374,10 +1374,30 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
         issuer: domain,
         authorization_endpoint: `${domain}/oauth/authorize`,
         token_endpoint: `${domain}/oauth/token`,
+        registration_endpoint: `${domain}/oauth/register`,
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
         code_challenge_methods_supported: ["S256", "plain"],
         token_endpoint_auth_methods_supported: ["none"],
+    });
+});
+
+// ============================================================
+// ROUTE 2.5: Dynamic Client Registration Endpoint (RFC 7591)
+// Accepts any registration request and echoes back a valid client ID.
+// ============================================================
+
+app.post("/oauth/register", express.json(), (req, res) => {
+    const body = req.body || {};
+    const clientId = body.client_id || `mcp-client-${crypto.randomBytes(8).toString("hex")}`;
+
+    res.status(201).json({
+        client_id: clientId,
+        client_secret_expires_at: 0,
+        redirect_uris: body.redirect_uris || [],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
     });
 });
 
