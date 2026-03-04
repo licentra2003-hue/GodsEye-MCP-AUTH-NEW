@@ -33,7 +33,7 @@ if (geminiApiKey) {
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use((req, res, next) => {
-    if (req.path.includes('/sse') || req.path.includes('.well-known')) {
+    if (req.path.includes('/sse') || req.path.includes('.well-known') || req.path.includes('/oauth')) {
         console.log(`[NETWORK DEBUG] ➡️ INCOMING ${req.method} ${req.url}`);
         console.log(`[NETWORK DEBUG] ➡️ HEADERS:`, JSON.stringify(req.headers));
 
