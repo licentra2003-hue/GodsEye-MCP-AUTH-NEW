@@ -1301,12 +1301,12 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🛡️ Client requested OAuth Protected Resource discovery.`);
     }
-    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
+    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
 
     const responsePayload = {
-        resource: domain,
-        // CRITICAL CHANGE: Tell mcp-remote to ask YOUR server for the auth details, not Supabase
-        authorization_servers: [domain],
+        resource: process.env.MCP_SERVER_DOMAIN || `https://${req.hostname}`,
+        // Point directly to Supabase so it handles Dynamic Client Registration
+        authorization_servers: [`${supabaseUrl}/auth/v1`],
     };
 
     if (process.env.DEBUG_MODE === "true") {
@@ -1315,30 +1315,42 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
     res.json(responsePayload);
 });
 
-app.get("/.well-known/oauth-authorization-server", (req, res) => {
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🔑 Client requested OAuth Authorization Server discovery.`);
-    }
-    const domain = process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`;
-    const cleanDomain = domain.replace(/\/$/, "");
-    const supabaseUrl = process.env.SUPABASE_URL!.replace(/\/$/, "");
+app.get("/oauth/consent", (req, res) => {
+    const authorizationId = req.query.authorization_id;
+    if (!authorizationId) return res.status(400).send("Missing authorization_id");
 
-    const responsePayload = {
-        issuer: cleanDomain,
-
-        // 🚨 CRITICAL FIX: These must use /oauth/, NOT /auth/v1/
-        authorization_endpoint: `${supabaseUrl}/oauth/authorize`,
-        token_endpoint: `${supabaseUrl}/oauth/token`,
-
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        code_challenge_methods_supported: ["S256"]
-    };
-
-    if (process.env.DEBUG_MODE === "true") {
-        console.log(`[DEBUG WORKFLOW] 🔑 Returning Auth Server config:`, responsePayload);
-    }
-    res.json(responsePayload);
+    const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Authorize GodsEye MCP</title>
+        <style>body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #121212; color: white; }</style>
+    </head>
+    <body>
+        <div style="background: #1e1e1e; padding: 2rem; border-radius: 8px; text-align: center;">
+            <h2>Connect GodsEye to Claude</h2>
+            <p>Claude is requesting access to your GodsEye data.</p>
+            <button id="approveBtn" style="padding: 10px 20px; font-size: 16px; cursor: pointer; background: #24b47e; color: white; border: none; border-radius: 4px;">Approve Access</button>
+            <p id="status"></p>
+        </div>
+        <script type="module">
+            import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm'
+            const supabase = createClient('${process.env.SUPABASE_URL}', '${process.env.SUPABASE_ANON_KEY}');
+            
+            document.getElementById('approveBtn').onclick = async () => {
+                document.getElementById('status').innerText = "Approving...";
+                const { data, error } = await supabase.auth.oauth.approveAuthorization('${authorizationId}');
+                if (error) {
+                    document.getElementById('status').innerText = "Error: " + error.message;
+                } else if (data?.redirect_to) {
+                    window.location.href = data.redirect_to;
+                }
+            };
+        </script>
+    </body>
+    </html>
+    `;
+    res.send(html);
 });
 
 app.get(["/sse", "/sse/"], requireOAuth, async (req, res) => {
