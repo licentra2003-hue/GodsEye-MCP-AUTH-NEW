@@ -1291,7 +1291,7 @@ ${err.stack}`,
 // 🔥 MULTI-USER SSE TRANSPORT
 // ============================================================
 
-app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/sse"], (req, res) => {
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
     if (process.env.DEBUG_MODE === "true") {
         console.log(`[DEBUG WORKFLOW] 🛡️ Client requested OAuth Protected Resource discovery.`);
     }
