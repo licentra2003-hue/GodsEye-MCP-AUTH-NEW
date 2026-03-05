@@ -1327,6 +1327,29 @@ setInterval(() => {
     }
 }, 2 * 60 * 1000);
 
+// ── In-memory Google OAuth state store ───────────────────────
+// Maps google_state → { original MCP OAuth params } so we can
+// resume the MCP auth code flow after Google redirects back.
+
+interface GoogleStateEntry {
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    state: string;
+    expiresAt: number;
+}
+
+const googleStateStore = new Map<string, GoogleStateEntry>();
+
+// Purge expired Google state entries every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of googleStateStore) {
+        if (now > entry.expiresAt) googleStateStore.delete(key);
+    }
+}, 5 * 60 * 1000);
+
 function verifyPkce(codeVerifier: string, codeChallenge: string, method: string): boolean {
     if (method === "S256") {
         const hash = crypto.createHash("sha256").update(codeVerifier).digest();
@@ -1475,6 +1498,19 @@ app.get("/oauth/authorize", (req, res) => {
     </form>
     <p id="error"></p>
     <p id="status"></p>
+
+    <div style="display:flex;align-items:center;gap:0.75rem;margin:1.5rem 0 1rem;">
+      <div style="flex:1;height:1px;background:#2a2a3e;"></div>
+      <span style="color:#555;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;">or</span>
+      <div style="flex:1;height:1px;background:#2a2a3e;"></div>
+    </div>
+
+    <a href="/oauth/google/initiate?client_id=${encodeURIComponent(client_id || "")}&redirect_uri=${encodeURIComponent(redirect_uri)}&code_challenge=${encodeURIComponent(code_challenge)}&code_challenge_method=${encodeURIComponent(code_challenge_method || "S256")}&state=${encodeURIComponent(state || "")}"
+       style="display:flex;align-items:center;justify-content:center;gap:0.6rem;width:100%;padding:0.75rem;background:#fff;color:#333;border:none;border-radius:6px;font-size:0.95rem;font-weight:600;text-decoration:none;transition:opacity 0.2s;cursor:pointer;"
+       onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
+      <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59a14.5 14.5 0 0 1 0-9.18l-7.98-6.19a24.01 24.01 0 0 0 0 21.56l7.98-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+      Sign in with Google
+    </a>
   </div>
   <script>
     document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -1574,6 +1610,119 @@ app.post("/oauth/authorize/callback", express.urlencoded({ extended: true }), as
 
     // Return redirect URL in JSON since fetch with redirect:'manual' can't read Location header
     return res.json({ redirect_to: callbackUrl.toString() });
+});
+
+// ============================================================
+// ROUTE 3.5: Google OAuth Initiate
+// Starts Supabase Google OAuth flow, preserving MCP PKCE params.
+//
+// IMPORTANT: In Supabase Dashboard → Auth → URL Configuration,
+// add "${MCP_SERVER_DOMAIN}/oauth/google/callback" to the
+// "Redirect URLs" allowlist, and enable Google provider under
+// Auth → Providers.
+// ============================================================
+
+app.get("/oauth/google/initiate", async (req, res) => {
+    const {
+        client_id,
+        redirect_uri,
+        code_challenge,
+        code_challenge_method,
+        state,
+    } = req.query as Record<string, string>;
+
+    if (!redirect_uri || !code_challenge) {
+        return res.status(400).send("Missing required OAuth parameters (redirect_uri, code_challenge).");
+    }
+
+    const domain = (process.env.MCP_SERVER_DOMAIN || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, "");
+
+    // Generate a unique state token to map Google's callback back to MCP params
+    const googleState = crypto.randomBytes(32).toString("base64url");
+
+    googleStateStore.set(googleState, {
+        clientId: client_id || "",
+        redirectUri: redirect_uri,
+        codeChallenge: code_challenge,
+        codeChallengeMethod: code_challenge_method || "S256",
+        state: state || "",
+        expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+    });
+
+    const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+            redirectTo: `${domain}/oauth/google/callback`,
+            queryParams: { state: googleState },
+            skipBrowserRedirect: true,
+        },
+    });
+
+    if (error || !data?.url) {
+        console.error("[OAUTH GOOGLE] Failed to initiate Google OAuth:", error?.message);
+        return res.status(500).send("Failed to initiate Google sign-in.");
+    }
+
+    console.log(`[OAUTH GOOGLE] Redirecting to Google OAuth, state=${googleState.substring(0, 8)}...`);
+    return res.redirect(data.url);
+});
+
+// ============================================================
+// ROUTE 3.6: Google OAuth Callback
+// Supabase redirects here after Google login. We exchange the
+// Supabase code for a session, then issue an MCP auth code.
+// ============================================================
+
+app.get("/oauth/google/callback", async (req, res) => {
+    const { code, state: googleState } = req.query as Record<string, string>;
+
+    if (!code || !googleState) {
+        return res.status(400).send("Missing code or state parameter from Google OAuth callback.");
+    }
+
+    // Retrieve the original MCP OAuth params
+    const stateEntry = googleStateStore.get(googleState);
+    if (!stateEntry) {
+        return res.status(400).send("Invalid or expired Google OAuth state. Please try again.");
+    }
+
+    if (Date.now() > stateEntry.expiresAt) {
+        googleStateStore.delete(googleState);
+        return res.status(400).send("Google OAuth state has expired. Please try again.");
+    }
+
+    // Exchange the Supabase auth code for a session
+    const { data: sessionData, error: sessionError } = await supabase.auth.exchangeCodeForSession(code);
+
+    if (sessionError || !sessionData?.session) {
+        console.error("[OAUTH GOOGLE] Code exchange failed:", sessionError?.message);
+        return res.status(401).send("Google sign-in failed: " + (sessionError?.message || "Could not exchange code."));
+    }
+
+    // Clean up the Google state
+    googleStateStore.delete(googleState);
+
+    // Generate an MCP auth code (same as email/password flow)
+    const authCode = crypto.randomBytes(32).toString("base64url");
+
+    authCodeStore.set(authCode, {
+        supabaseAccessToken: sessionData.session.access_token,
+        supabaseRefreshToken: sessionData.session.refresh_token,
+        codeChallenge: stateEntry.codeChallenge,
+        codeChallengeMethod: stateEntry.codeChallengeMethod,
+        redirectUri: stateEntry.redirectUri,
+        clientId: stateEntry.clientId,
+        expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
+    });
+
+    console.log(`[OAUTH GOOGLE] Auth code issued for user ${sessionData.user.id}, client ${stateEntry.clientId}`);
+
+    // Redirect back to mcp-remote
+    const callbackUrl = new URL(stateEntry.redirectUri);
+    callbackUrl.searchParams.set("code", authCode);
+    if (stateEntry.state) callbackUrl.searchParams.set("state", stateEntry.state);
+
+    return res.redirect(302, callbackUrl.toString());
 });
 
 // ============================================================
