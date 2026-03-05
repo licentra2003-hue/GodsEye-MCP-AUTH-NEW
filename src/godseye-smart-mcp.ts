@@ -1338,6 +1338,7 @@ interface GoogleStateEntry {
     codeChallengeMethod: string;
     state: string;
     expiresAt: number;
+    codeVerifier: string; // Supabase PKCE verifier — must be stored server-side
 }
 
 const googleStateStore = new Map<string, GoogleStateEntry>();
@@ -1640,15 +1641,6 @@ app.get("/oauth/google/initiate", async (req, res) => {
     // Generate a unique state token to map Google's callback back to MCP params
     const googleState = crypto.randomBytes(32).toString("base64url");
 
-    googleStateStore.set(googleState, {
-        clientId: client_id || "",
-        redirectUri: redirect_uri,
-        codeChallenge: code_challenge,
-        codeChallengeMethod: code_challenge_method || "S256",
-        state: state || "",
-        expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
-    });
-
     const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
@@ -1662,6 +1654,18 @@ app.get("/oauth/google/initiate", async (req, res) => {
         console.error("[OAUTH GOOGLE] Failed to initiate Google OAuth:", error?.message);
         return res.status(500).send("Failed to initiate Google sign-in.");
     }
+
+    // Save codeVerifier — Supabase generates it internally for PKCE but can't
+    // store it in localStorage on a Node.js server. We must preserve it ourselves.
+    googleStateStore.set(googleState, {
+        clientId: client_id || "",
+        redirectUri: redirect_uri,
+        codeChallenge: code_challenge,
+        codeChallengeMethod: code_challenge_method || "S256",
+        state: state || "",
+        expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+        codeVerifier: (data as any).codeVerifier ?? "",
+    });
 
     console.log(`[OAUTH GOOGLE] Redirecting to Google OAuth, state=${googleState.substring(0, 8)}...`);
     return res.redirect(data.url);
@@ -1691,8 +1695,32 @@ app.get("/oauth/google/callback", async (req, res) => {
         return res.status(400).send("Google OAuth state has expired. Please try again.");
     }
 
-    // Exchange the Supabase auth code for a session
-    const { data: sessionData, error: sessionError } = await supabase.auth.exchangeCodeForSession(code);
+    // Create a temporary Supabase client whose "storage" returns the saved code verifier.
+    // This is required because exchangeCodeForSession reads the verifier from storage,
+    // but on a Node.js server there's no browser localStorage to hold it.
+    const tempSupabase = createClient(
+        process.env.SUPABASE_URL!,
+        process.env.SUPABASE_KEY!,
+        {
+            auth: {
+                storage: {
+                    getItem: (storageKey: string) => {
+                        if (storageKey.includes("code-verifier") || storageKey.includes("code_verifier")) {
+                            return stateEntry.codeVerifier;
+                        }
+                        return null;
+                    },
+                    setItem: (_key: string, _value: string) => { },
+                    removeItem: (_key: string) => { },
+                },
+                autoRefreshToken: false,
+                persistSession: false,
+            },
+        }
+    );
+
+    // Exchange the Supabase auth code for a session using the temp client
+    const { data: sessionData, error: sessionError } = await tempSupabase.auth.exchangeCodeForSession(code);
 
     if (sessionError || !sessionData?.session) {
         console.error("[OAUTH GOOGLE] Code exchange failed:", sessionError?.message);
